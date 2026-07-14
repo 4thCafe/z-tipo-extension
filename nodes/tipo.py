@@ -30,6 +30,10 @@ from kgen.executor.tipo import (
 from kgen.formatter import seperate_tags, apply_format
 from kgen.logging import logger
 
+from .pony_score import patch_kgen_tag_lists, inject_pony_score
+
+patch_kgen_tag_lists()
+
 
 models.model_dir = Path(folder_paths.models_dir) / "kgen"
 os.makedirs(models.model_dir, exist_ok=True)
@@ -204,9 +208,10 @@ class TIPO:
             "format": (
                 "STRING",
                 {
-                    "default": """<|special|>, 
-<|characters|>, <|copyrights|>, 
-<|artist|>, 
+                    "default": """<|pony_score|>,
+<|special|>,
+<|characters|>, <|copyrights|>,
+<|artist|>,
 
 <|general|>,
 
@@ -335,6 +340,7 @@ class TIPO:
         org_formatted_prompt = apply_strength(
             org_formatted_prompt, strength_map, strength_map_nl
         )
+        org_formatted_prompt = inject_pony_score(org_formatted_prompt, org_tag_map)
         formatted_prompt_by_user = apply_format(org_formatted_prompt, format)
         unformatted_prompt_by_user = tags + nl_prompt
 
@@ -374,6 +380,7 @@ class TIPO:
         )
 
         tag_map = apply_strength(tag_map, strength_map, strength_map_nl)
+        tag_map = inject_pony_score(tag_map, org_tag_map)
         formatted_prompt_by_tipo = apply_format(tag_map, format)
         return (
             formatted_prompt_by_tipo,
@@ -531,6 +538,7 @@ class TIPOOperation:
         addon["user_nl"] = nl_prompt_wihtout_extranet
 
         tag_map = apply_strength(tag_map, strength_map, strength_map_nl)
+        tag_map = inject_pony_score(tag_map, org_tag_map)
         return (
             tag_map,
             addon,
@@ -545,9 +553,10 @@ class TIPOFormat:
             "format": (
                 "STRING",
                 {
-                    "default": """<|special|>, 
-<|characters|>, <|copyrights|>, 
-<|artist|>, 
+                    "default": """<|pony_score|>,
+<|special|>,
+<|characters|>, <|copyrights|>,
+<|artist|>,
 
 <|general|>,
 
@@ -622,6 +631,7 @@ class TIPOFormat:
         org_formatted_prompt = apply_strength(
             org_formatted_prompt, strength_map, strength_map_nl
         )
+        org_formatted_prompt = inject_pony_score(org_formatted_prompt, org_tag_map)
         formatted_prompt_by_user = apply_format(org_formatted_prompt, format)
         unformatted_prompt_by_user = tags + nl_prompt
         formatted_prompt_by_tipo = apply_format(tag_map, format)

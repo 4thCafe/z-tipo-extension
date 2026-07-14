@@ -54,7 +54,8 @@ Clone this repo into the custom_node folder, after restart the comfyui, you will
   * `<|artist|>`: artist tags
   * `<|general|>`: general tags
   * `<|meta|>`: highres/lowres/absurdres are all meta tags
-  * `<|quality|>`: score_xxx, masterpiece, best quality...
+  * `<|quality|>`: masterpiece, best quality...
+  * `<|pony_score|>`: Pony Diffusion style score tags (score_9, score_8_up, ... score_1_up). Kept separate from `<|quality|>` since these follow a different convention (usually placed at the very front of the prompt) and only apply to Pony-based models.
   * `<|rating|>`: safe, sensitive, nsfw, explicit ...
   * `<|generated|>`: generated NL prompt
   * `<|extended|>`: extended NL prompt (If nl prompt is not provided, extended will be filled with generated NL caption. if both extended and generated are in the format but nl prompt is not provided, TIPO will generate 2 NL prompt.)
