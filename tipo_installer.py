@@ -87,96 +87,78 @@ def get_installed_version(package: str):
         return None
 
 
-llama_cpp_python_wheel = (
-    "llama-cpp-python --prefer-binary "
-    "--extra-index-url=https://jllllll.github.io/llama-cpp-python-cuBLAS-wheels/{}/{}"
-)
-llama_cpp_python_wheel_official = (
-    "https://github.com/abetlen/llama-cpp-python/releases/download/"
-    "v{version_arch}/llama_cpp_python-{version}-{python}-{python}-{platform}.whl"
-)
-version_arch = {
-    "0.3.4": [
-        ("cp39", "cp310", "cp311", "cp312"),
-        ("cu121", "cu122", "cu123", "cu124", "metal"),
-        ("linux_x86_64", "win_amd64", "maxosx_11_0_arm64"),
-    ],
-    "0.3.2": [
-        ("cp38", "cp39", "cp310", "cp311", "cp312"),
-        ("cpu", "metal"),
-        ("linux_x86_64", "win_amd64", "maxosx_11_0_arm64"),
-    ],
-}
+# abetlen 公式の PEP503 wheel インデックス経由でインストールする。
+# 0.3.34 以降は Python 版共通の py3-none wheel を配布しており、
+# Python 3.13 を含む全バージョンを1つの wheel でカバーできる。
+LLAMA_CPP_TARGET = "0.3.34"
+# 0.3.34 で供給されている CUDA arch (whl index の variant 名 cuXXX の数値部分)
+LLAMA_CPP_CUDA_ARCHS = [118, 121, 122, 123, 124, 125, 130, 132]
+LLAMA_INDEX = "https://abetlen.github.io/llama-cpp-python/whl/{variant}"
 
 
-def install_llama_cpp_legacy(cuda_version, has_cuda):
-    if cuda_version >= "122":
-        cuda_version = "122"
-    package = llama_cpp_python_wheel.format(
-        "AVX2", f"cu{cuda_version}" if has_cuda else "cpu"
-    )
+def _version_tuple(v):
+    """'0.3.34' のようなバージョン文字列を比較可能な数値タプルに変換する。
+    文字列比較だと '0.3.4' > '0.3.34' と誤判定するため使う。"""
+    parts = []
+    for p in str(v).split(".")[:3]:
+        num = ""
+        for ch in p:
+            if ch.isdigit():
+                num += ch
+            else:
+                break
+        parts.append(int(num) if num else 0)
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts)
 
-    run_pip(f"install {package}")
+
+def _select_cuda_variant(cuda_version):
+    """torch が報告する CUDA バージョン (例 '12.6') から、abetlen が供給する
+    最も近い arch (検出値以下で最大) を選ぶ。低 CUDA 向け wheel は上位ドライバで
+    動くが逆は不可のため round-down する。CUDA 無しは 'cpu'。"""
+    if not cuda_version:
+        return "cpu"
+    major, _, minor = cuda_version.partition(".")
+    try:
+        detected = int(major) * 10 + int(minor or 0)
+    except ValueError:
+        return "cpu"
+    candidates = [a for a in LLAMA_CPP_CUDA_ARCHS if a <= detected]
+    arch = max(candidates) if candidates else min(LLAMA_CPP_CUDA_ARCHS)
+    return f"cu{arch}"
 
 
 def install_llama_cpp():
-    if get_installed_version("llama_cpp_python") is not None:
-        return
+    # 目標版以上が既に import できる環境 (自作 CUDA ビルド等) は尊重してスキップ。
+    # import 不可 or 旧版のときだけ導入する。
+    try:
+        import llama_cpp  # noqa: F401
+
+        installed = get_installed_version("llama_cpp_python")
+        if installed is not None and _version_tuple(installed) >= _version_tuple(
+            LLAMA_CPP_TARGET
+        ):
+            return
+    except Exception:
+        pass
+
     logger.info("Attempting to install LLaMA-CPP-Python")
     import torch
 
-    platform = sys.platform
-    py_ver = f"cp{sys.version_info.major}{sys.version_info.minor}"
-    if platform == "darwin":
-        platform = "maxosx_11_0_arm64"
-    elif platform == "win32":
-        platform = "win_amd64"
-    elif platform == "linux":
-        platform = "linux_x86_64"
-
-    has_cuda = torch.cuda.is_available()
-    has_metal = torch.backends.mps.is_available() and torch.backends.mps.is_built()
-
-    if has_cuda:
-        cuda_version = torch.version.cuda.replace(".", "")
-        arch = "cu" + cuda_version
-    elif has_metal:
-        # torch.version.cuda is None on Apple Silicon
-        cuda_version = "metal"
-        arch = "metal"
+    if torch.cuda.is_available() and torch.version.cuda:
+        variant = _select_cuda_variant(torch.version.cuda)
     else:
-        cuda_version = ""
-        arch = "cpu"
+        # macOS/Metal は対象外。非 CUDA 環境は CPU ビルドにフォールバックする。
+        variant = "cpu"
 
-    if has_cuda and arch > "cu124":
-        arch = "cu124"
-
-    for version, (py_vers, archs, platforms) in version_arch.items():
-        if py_ver in py_vers and arch in archs and platform in platforms:
-            break
-    else:
-        if cuda_version == "metal":
-            logger.warning(
-                "Metal Performance Shaders detected. "
-                "Prebuilt llama-cpp-python may not be available. "
-                "For better performance, you may need to reinstall and build it manually. "
-                "Goto: https://github.com/abetlen/llama-cpp-python/"
-            )
-
-        logger.warning("Official wheel not found, using legacy builds")
-        install_llama_cpp_legacy(cuda_version, has_cuda)
-        return
-
-    wheel = llama_cpp_python_wheel_official.format(
-        version=version,
-        python=py_ver,
-        platform=platform,
-        version_arch=f"{version}-{arch}",
-    )
-
+    index = LLAMA_INDEX.format(variant=variant)
     try:
-        run_pip(f"install {wheel}")
-        logger.info("Installation of llama-cpp-python succeeded")
+        run_pip(
+            f'install -U "llama-cpp-python>={LLAMA_CPP_TARGET}" '
+            f"--prefer-binary --extra-index-url {index}"
+        )
+        logger.info(f"Installation of llama-cpp-python ({variant}) succeeded")
     except Exception:
         logger.warning(
             "Installation of llama-cpp-python failed, "

@@ -24,6 +24,10 @@ More information about model arch and training data can be found in the HuggingF
 
 [KBlueLeaf/DanTagGen-beta · Hugging Face](https://huggingface.co/KBlueLeaf/DanTagGen-beta)
 
+## Requirements
+
+- GGUF (llama.cpp) models require `llama-cpp-python` **0.3.34 or later**, installed automatically via abetlen's prebuilt wheel index (CUDA build matched to your environment, falling back to CPU). This adds Python 3.13 support; older pins only shipped wheels up to Python 3.12. macOS/Metal is out of scope and falls back to the CPU wheel.
+
 ## How to use it
 
 ### SD-WebUI/Forge
