@@ -237,6 +237,10 @@ class TIPO:
             ),
             "seed": ("INT", {"default": 1234}),
             "device": (["cpu", "cuda"], {"default": "cuda"}),
+            "enable_generation": (
+                "BOOLEAN",
+                {"default": True, "label_on": "enabled", "label_off": "disabled"},
+            ),
         },
     }
 
@@ -267,9 +271,11 @@ class TIPO:
         min_p: float,
         top_k: int,
         device: str,
+        enable_generation: bool = True,
     ):
         global current_model
-        if (tipo_model, device) != current_model:
+        # 推論オフ時はモデルのDL/ロードを一切行わない
+        if enable_generation and (tipo_model, device) != current_model:
             if " | " in tipo_model:
                 model_name, gguf_name = tipo_model.split(" | ")
                 target_file = f"{model_name.split('/')[-1]}_{gguf_name}"
@@ -343,6 +349,15 @@ class TIPO:
         org_formatted_prompt = inject_pony_score(org_formatted_prompt, org_tag_map)
         formatted_prompt_by_user = apply_format(org_formatted_prompt, format)
         unformatted_prompt_by_user = tags + nl_prompt
+
+        # 推論オフ: tipo_runner 以降をスキップし、推論なしの整形結果を返す
+        if not enable_generation:
+            return (
+                formatted_prompt_by_user,
+                formatted_prompt_by_user,
+                unformatted_prompt_by_user,
+                unformatted_prompt_by_user,
+            )
 
         tag_map, _ = tipo_runner(
             meta,

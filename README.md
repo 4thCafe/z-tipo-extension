@@ -59,6 +59,7 @@ Clone this repo into the custom_node folder, after restart the comfyui, you will
   * `<|rating|>`: safe, sensitive, nsfw, explicit ...
   * `<|generated|>`: generated NL prompt
   * `<|extended|>`: extended NL prompt (If nl prompt is not provided, extended will be filled with generated NL caption. if both extended and generated are in the format but nl prompt is not provided, TIPO will generate 2 NL prompt.)
+* enable_generation (TIPO node): When `enabled` (default), the LLM performs text-presampling as usual. When `disabled`, the node skips the LLM entirely — no model download, no VRAM load, no inference — and simply reorders/formats the tags you provided according to the format string. Use it when you only want the tag-sorting behavior.
 * Seed: the seed of prompt generator. Since we use temperature/top k/top p sampling, so it is not deterministic unless you use same seed. -1 for random seed.
 * Upsampling timing:
   * After: after other prompt processings, for example: after dynamic prompts/wildcard.
