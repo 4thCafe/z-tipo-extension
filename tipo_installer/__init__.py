@@ -9,6 +9,7 @@ import importlib
 import importlib.metadata
 import importlib.util
 import os
+import re
 import sys
 
 from . import hardware, pkg, scheme, wheels
@@ -21,6 +22,8 @@ __all__ = [
     "install_llama_cpp",
     "install_tipo_kgen",
     "logger",
+    "prepare_dll_path",
+    "rebind_kgen_llama",
 ]
 
 _llama_state = None
@@ -51,8 +54,6 @@ def installed_version(distribution):
 
 
 def _as_tuple(text):
-    import re
-
     return tuple(int(part) for part in re.findall(r"\d+", str(text or "")))
 
 
@@ -134,11 +135,33 @@ def ensure_tipo_kgen():
     return _kgen_state
 
 
+def rebind_kgen_llama():
+    """Hand kgen the Llama class if llama-cpp only arrived after kgen was imported.
+
+    kgen.models binds `Llama` once, at its own import, and falls back to None.
+    Loading the model list at startup therefore pins None into the module long
+    before the wheel is installed, and every later GGUF load would trip kgen's
+    `assert Llama is not None` despite llama-cpp being present.
+    """
+    models = sys.modules.get("kgen.models")
+    if models is None or getattr(models, "Llama", None) is not None:
+        return
+    try:
+        from llama_cpp import Llama
+    except ImportError:
+        return
+    models.Llama = Llama
+    logger.info("Rebound llama_cpp.Llama into the already-imported kgen.models")
+
+
 def ensure_runtime():
     """Full bootstrap for a node execution; returns True if GGUF models can load."""
     ensure_tipo_kgen()
     prepare_dll_path()
-    return ensure_llama_cpp()
+    ready = ensure_llama_cpp()
+    if ready:
+        rebind_kgen_llama()
+    return ready
 
 
 install_llama_cpp = ensure_llama_cpp

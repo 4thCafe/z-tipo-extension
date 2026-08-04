@@ -1,18 +1,32 @@
 import os
 import re
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import folder_paths
 from comfy.cli_args import args
 from comfy_api.latest import io
+from kgen import models
+from kgen.executor import tipo as tipo_executor
+from kgen.executor.tipo import (
+    OPERATION_LIST,
+    apply_tipo_prompt,
+    parse_tipo_request,
+    parse_tipo_result,
+    tipo_runner,
+    tipo_single_request,
+)
+from kgen.formatter import apply_format, seperate_tags
 
 from ..tipo_installer import ensure_runtime, logger
 from ..tipo_installer.hardware import torch_devices
 
 CATEGORY = "utils/promptgen"
 LIST = io.Custom("LIST")
+
+models.model_dir = Path(folder_paths.models_dir) / "kgen"
+os.makedirs(models.model_dir, exist_ok=True)
+logger.info(f"Using model dir: {models.model_dir}")
 
 DEFAULT_FORMAT = """<|special|>,
 <|characters|>, <|copyrights|>,
@@ -26,74 +40,12 @@ DEFAULT_FORMAT = """<|special|>,
 
 LENGTH_OPTIONS = ["very_short", "short", "long", "very_long"]
 
-_kgen = None
+DEFAULT_OPERATION = "short_to_tag_to_long"
+
 _current_model = None
 
 
-def kgen():
-    """Import kgen, installing dependencies on first use. Raises if unavailable."""
-    global _kgen
-    if _kgen is not None:
-        return _kgen
-
-    ensure_runtime()
-    try:
-        from kgen import models
-        from kgen.executor import tipo
-        from kgen.executor.tipo import (
-            OPERATION_LIST,
-            apply_tipo_prompt,
-            parse_tipo_request,
-            parse_tipo_result,
-            tipo_runner,
-            tipo_single_request,
-        )
-        from kgen.formatter import apply_format, seperate_tags
-    except ImportError as error:
-        raise RuntimeError(
-            "TIPO needs the 'tipo-kgen' package, which could not be imported or "
-            f"installed automatically ({error}). Install it with:\n"
-            "    pip install -U tipo-kgen"
-        ) from error
-
-    models.model_dir = Path(folder_paths.models_dir) / "kgen"
-    os.makedirs(models.model_dir, exist_ok=True)
-    logger.info(f"Using model dir: {models.model_dir}")
-
-    _kgen = SimpleNamespace(
-        models=models,
-        tipo=tipo,
-        OPERATION_LIST=OPERATION_LIST,
-        apply_format=apply_format,
-        apply_tipo_prompt=apply_tipo_prompt,
-        parse_tipo_request=parse_tipo_request,
-        parse_tipo_result=parse_tipo_result,
-        seperate_tags=seperate_tags,
-        tipo_runner=tipo_runner,
-        tipo_single_request=tipo_single_request,
-    )
-    return _kgen
-
-
-def _quiet_models():
-    """kgen.models for schema building only; None when kgen is not installed yet."""
-    try:
-        from kgen import models
-    except ImportError:
-        return None
-    try:
-        models.model_dir = Path(folder_paths.models_dir) / "kgen"
-        os.makedirs(models.model_dir, exist_ok=True)
-    except OSError:
-        return None
-    return models
-
-
 def model_options():
-    models = _quiet_models()
-    if models is None:
-        return ["<install tipo-kgen to list models>"]
-
     names = [
         f"{name} | {gguf}" for name, ggufs in models.tipo_model_list for gguf in ggufs
     ]
@@ -104,16 +56,8 @@ def model_options():
     return names
 
 
-DEFAULT_OPERATION = "short_to_tag_to_long"
-
-
 def operation_options():
-    try:
-        from kgen.executor.tipo import OPERATION_LIST
-
-        return sorted(OPERATION_LIST)
-    except ImportError:
-        return [DEFAULT_OPERATION]
+    return sorted(OPERATION_LIST)
 
 
 COMMENT_LINE = re.compile(r"^[^\S\n]*#[^\n]*(?:\n|$)", re.MULTILINE)
@@ -355,8 +299,6 @@ def load_model(tipo_model, device):
     if (tipo_model, device) == _current_model:
         return
 
-    api = kgen()
-    models = api.models
     if " | " in tipo_model:
         model_name, gguf_name = tipo_model.split(" | ")
         target_file = f"{model_name.split('/')[-1]}_{gguf_name}"
@@ -479,7 +421,7 @@ class TIPO(io.ComfyNode):
         device: str,
         format: str,
     ) -> io.NodeOutput:
-        api = kgen()
+        ensure_runtime()
         load_model(tipo_model, device)
 
         tags, networks = extract_extra_networks(strip_comments(tags))
@@ -489,13 +431,15 @@ class TIPO(io.ComfyNode):
         nl_prompt, _, _, strength_map_nl = split_weighted(nl_prompt)
         embeddings = embedding_spellings(all_tags)
 
-        api.tipo.BAN_TAGS = [tag.strip() for tag in ban_tags.split(",") if tag.strip()]
+        tipo_executor.BAN_TAGS = [
+            tag.strip() for tag in ban_tags.split(",") if tag.strip()
+        ]
 
         tag_length = tag_length.replace(" ", "_")
         nl_length = nl_length.replace(" ", "_")
-        org_tag_map = restore_embeddings(api.seperate_tags(all_tags), embeddings)
+        org_tag_map = restore_embeddings(seperate_tags(all_tags), embeddings)
 
-        meta, operations, general, nl_prompt = api.parse_tipo_request(
+        meta, operations, general, nl_prompt = parse_tipo_request(
             org_tag_map,
             nl_prompt,
             tag_length_target=tag_length,
@@ -505,8 +449,8 @@ class TIPO(io.ComfyNode):
         )
         meta["aspect_ratio"] = f"{width / height:.1f}"
 
-        org_formatted_prompt = api.parse_tipo_result(
-            api.apply_tipo_prompt(
+        org_formatted_prompt = parse_tipo_result(
+            apply_tipo_prompt(
                 meta,
                 general,
                 nl_prompt,
@@ -519,10 +463,10 @@ class TIPO(io.ComfyNode):
         org_formatted_prompt = apply_strength(
             org_formatted_prompt, strength_map, strength_map_nl
         )
-        formatted_prompt_by_user = api.apply_format(org_formatted_prompt, format)
+        formatted_prompt_by_user = apply_format(org_formatted_prompt, format)
         unformatted_prompt_by_user = tags + nl_prompt
 
-        tag_map, _ = api.tipo_runner(
+        tag_map, _ = tipo_runner(
             meta,
             operations,
             general,
@@ -543,7 +487,7 @@ class TIPO(io.ComfyNode):
         )
 
         tag_map = apply_strength(tag_map, strength_map, strength_map_nl)
-        formatted_prompt_by_tipo = api.apply_format(tag_map, format)
+        formatted_prompt_by_tipo = apply_format(tag_map, format)
         tag_prompt, nl_output = split_tag_map(tag_map)
 
         return io.NodeOutput(
@@ -596,7 +540,7 @@ class TIPOOperation(io.ComfyNode):
         device: str,
         operation: str,
     ) -> io.NodeOutput:
-        api = kgen()
+        ensure_runtime()
         load_model(tipo_model, device)
 
         tags, networks = extract_extra_networks(strip_comments(tags))
@@ -607,12 +551,14 @@ class TIPOOperation(io.ComfyNode):
         nl_prompt, _, _, strength_map_nl = split_weighted(nl_prompt)
         embeddings = embedding_spellings(all_tags)
 
-        api.tipo.BAN_TAGS = [tag.strip() for tag in ban_tags.split(",") if tag.strip()]
+        tipo_executor.BAN_TAGS = [
+            tag.strip() for tag in ban_tags.split(",") if tag.strip()
+        ]
 
         tag_length = tag_length.replace(" ", "_")
-        org_tag_map = restore_embeddings(api.seperate_tags(all_tags), embeddings)
+        org_tag_map = restore_embeddings(seperate_tags(all_tags), embeddings)
 
-        meta, operations, general, nl_prompt = api.tipo_single_request(
+        meta, operations, general, nl_prompt = tipo_single_request(
             org_tag_map,
             nl_prompt,
             tag_length_target=tag_length,
@@ -621,7 +567,7 @@ class TIPOOperation(io.ComfyNode):
         )
         meta["aspect_ratio"] = f"{width / height:.1f}"
 
-        tag_map, _ = api.tipo_runner(
+        tag_map, _ = tipo_runner(
             meta,
             operations,
             general,
@@ -668,7 +614,7 @@ class TIPOFormat(io.ComfyNode):
         addon_output: dict[str, Any],
         format: str,
     ) -> io.NodeOutput:
-        api = kgen()
+        ensure_runtime()
 
         addon = dict(addon_output)
         tags = addon.pop("user_tags", "")
@@ -680,11 +626,11 @@ class TIPOFormat(io.ComfyNode):
         nl_prompt, _, _, strength_map_nl = split_weighted(nl_prompt)
         embeddings = embedding_spellings(all_tags)
 
-        org_tag_map = restore_embeddings(api.seperate_tags(all_tags), embeddings)
-        meta, _, general, nl_prompt = api.parse_tipo_request(org_tag_map, nl_prompt)
+        org_tag_map = restore_embeddings(seperate_tags(all_tags), embeddings)
+        meta, _, general, nl_prompt = parse_tipo_request(org_tag_map, nl_prompt)
 
-        org_formatted_prompt = api.parse_tipo_result(
-            api.apply_tipo_prompt(
+        org_formatted_prompt = parse_tipo_result(
+            apply_tipo_prompt(
                 meta,
                 general,
                 nl_prompt,
@@ -698,9 +644,9 @@ class TIPOFormat(io.ComfyNode):
             org_formatted_prompt, strength_map, strength_map_nl
         )
 
-        formatted_prompt_by_user = api.apply_format(org_formatted_prompt, format)
+        formatted_prompt_by_user = apply_format(org_formatted_prompt, format)
         unformatted_prompt_by_user = tags + nl_prompt
-        formatted_prompt_by_tipo = api.apply_format(tag_map, format)
+        formatted_prompt_by_tipo = apply_format(tag_map, format)
         unformatted_prompt_by_tipo = (
             tags + ", " + ", ".join(addon["tags"]) + "\n" + addon["nl"]
         )

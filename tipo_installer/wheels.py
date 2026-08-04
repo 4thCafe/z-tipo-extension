@@ -16,6 +16,12 @@ from . import scheme
 from .hardware import Accelerator, detect, forced_variant
 from .log import logger
 
+try:
+    from packaging.tags import sys_tags
+    from packaging.utils import parse_wheel_filename
+except ImportError:
+    sys_tags = parse_wheel_filename = None
+
 _TAG_RE = re.compile(scheme.TAG_PATTERN)
 _catalog_cache = None
 
@@ -99,9 +105,9 @@ def _catalog():
 
 
 def _supported_tags():
+    if sys_tags is None:
+        return None
     try:
-        from packaging.tags import sys_tags
-
         return {str(tag) for tag in sys_tags()}
     except Exception:
         return None
@@ -116,8 +122,6 @@ def _compatible_asset(assets):
                 return name
             continue
         try:
-            from packaging.utils import parse_wheel_filename
-
             tags = parse_wheel_filename(name)[3]
         except Exception:
             continue
