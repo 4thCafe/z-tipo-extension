@@ -116,6 +116,111 @@ def operation_options():
         return [DEFAULT_OPERATION]
 
 
+COMMENT_LINE = re.compile(r"^[^\S\n]*#[^\n]*(?:\n|$)", re.MULTILINE)
+EXTRA_NETWORK = re.compile(r"<[^<>]+>")
+EMBEDDING_PREFIX = re.compile(r"^embedding:", re.IGNORECASE)
+DANGLING = re.compile(r"(?:^[\s,]+|[\s,]+$)")
+REPEATED_COMMA = re.compile(r",\s*(?=,)")
+NL_CATEGORIES = ("extended", "generated")
+# Whitelisted, because tag_map also carries control fields such as `tag` and
+# `target` whose values are prompt markers like <|tag_to_long|>.
+TAG_CATEGORIES = (
+    "special",
+    "characters",
+    "copyrights",
+    "artist",
+    "general",
+    "quality",
+    "meta",
+    "rating",
+)
+
+
+def strip_comments(text: str) -> str:
+    """Drop lines whose first non-space character is '#' (issue #22)."""
+    if not text or "#" not in text:
+        return text
+    cleaned = REPEATED_COMMA.sub("", COMMENT_LINE.sub("", text))
+    return DANGLING.sub("", cleaned)
+
+
+def extract_extra_networks(text: str) -> "tuple[str, list[str]]":
+    """Lift `<lora:...>` syntax out of the prompt so TIPO cannot rewrite it."""
+    found = []
+
+    def take(match):
+        found.append(match.group(0))
+        return " "
+
+    remaining = REPEATED_COMMA.sub("", EXTRA_NETWORK.sub(take, text or ""))
+    return DANGLING.sub("", remaining), found
+
+
+def embedding_names() -> "set[str]":
+    try:
+        files = folder_paths.get_filename_list("embeddings")
+    except Exception:
+        return set()
+    return {os.path.splitext(os.path.basename(str(f)))[0].lower() for f in files}
+
+
+def embedding_spellings(tags) -> "dict[str, str]":
+    """Map kgen's spaced form back to the original, for embeddings only.
+
+    seperate_tags spaces out underscores for any token no tag list claims. That
+    is correct for general tags, but an embedding name looks exactly like a tag
+    and only the host can tell them apart, so ask ComfyUI which names exist and
+    protect just those (issue #119).
+    """
+    known = embedding_names()
+    if not known:
+        return {}
+    mapping = {}
+    for tag in tags:
+        bare = EMBEDDING_PREFIX.sub("", tag)
+        if len(bare) >= 4 and "_" in bare and bare.lower() in known:
+            mapping[bare.replace("_", " ")] = tag
+    return mapping
+
+
+def restore_embeddings(tag_map, mapping):
+    if not mapping:
+        return tag_map
+    for cate, value in tag_map.items():
+        if isinstance(value, list):
+            tag_map[cate] = [mapping.get(tag, tag) for tag in value]
+        elif isinstance(value, str):
+            for spaced, original in mapping.items():
+                value = value.replace(spaced, original)
+            tag_map[cate] = value
+    return tag_map
+
+
+def split_tag_map(tag_map) -> "tuple[str, str]":
+    """Split the result into tag text and natural-language text (issue #102)."""
+    tags = []
+    for cate in TAG_CATEGORIES:
+        value = tag_map.get(cate)
+        if isinstance(value, list):
+            tags.extend(str(tag) for tag in value if str(tag).strip())
+        elif isinstance(value, str) and value.strip():
+            tags.append(value.strip())
+
+    natural = []
+    for cate in NL_CATEGORIES:
+        value = tag_map.get(cate)
+        if isinstance(value, str) and value.strip():
+            natural.append(value.strip())
+    return ", ".join(tags), " ".join(natural)
+
+
+def with_networks(text: str, networks) -> str:
+    if not networks:
+        return text
+    joined = " ".join(networks)
+    return f"{text.rstrip().rstrip(',')}, {joined}" if text.strip() else joined
+
+
 attn_syntax = (
     r"\\\(|"
     r"\\\)|"
@@ -328,11 +433,15 @@ def common_inputs(fifth):
 
 
 def prompt_outputs():
+    # tag_prompt/nl_prompt are appended, never inserted: output links are stored
+    # by index, so reordering would rewire saved workflows.
     return [
         io.String.Output(display_name="prompt"),
         io.String.Output(display_name="user_prompt"),
         io.String.Output(display_name="unformatted_prompt"),
         io.String.Output(display_name="unformatted_user_prompt"),
+        io.String.Output(display_name="tag_prompt"),
+        io.String.Output(display_name="nl_prompt"),
     ]
 
 
@@ -373,14 +482,18 @@ class TIPO(io.ComfyNode):
         api = kgen()
         load_model(tipo_model, device)
 
+        tags, networks = extract_extra_networks(strip_comments(tags))
+        nl_prompt = strip_comments(nl_prompt)
+
         _, all_tags, strength_map, _ = split_weighted(tags)
         nl_prompt, _, _, strength_map_nl = split_weighted(nl_prompt)
+        embeddings = embedding_spellings(all_tags)
 
         api.tipo.BAN_TAGS = [tag.strip() for tag in ban_tags.split(",") if tag.strip()]
 
         tag_length = tag_length.replace(" ", "_")
         nl_length = nl_length.replace(" ", "_")
-        org_tag_map = api.seperate_tags(all_tags)
+        org_tag_map = restore_embeddings(api.seperate_tags(all_tags), embeddings)
 
         meta, operations, general, nl_prompt = api.parse_tipo_request(
             org_tag_map,
@@ -421,6 +534,7 @@ class TIPO(io.ComfyNode):
             top_k=top_k,
         )
 
+        tag_map = restore_embeddings(tag_map, embeddings)
         addon = apply_strength(
             collect_addon(tag_map, org_tag_map), strength_map, strength_map_nl
         )
@@ -430,12 +544,15 @@ class TIPO(io.ComfyNode):
 
         tag_map = apply_strength(tag_map, strength_map, strength_map_nl)
         formatted_prompt_by_tipo = api.apply_format(tag_map, format)
+        tag_prompt, nl_output = split_tag_map(tag_map)
 
         return io.NodeOutput(
-            formatted_prompt_by_tipo,
+            with_networks(formatted_prompt_by_tipo, networks),
             formatted_prompt_by_user,
-            unformatted_prompt_by_tipo,
+            with_networks(unformatted_prompt_by_tipo, networks),
             unformatted_prompt_by_user,
+            with_networks(tag_prompt, networks),
+            nl_output,
         )
 
 
@@ -482,14 +599,18 @@ class TIPOOperation(io.ComfyNode):
         api = kgen()
         load_model(tipo_model, device)
 
+        tags, networks = extract_extra_networks(strip_comments(tags))
+        nl_prompt = strip_comments(nl_prompt)
+
         original_nl_prompt = nl_prompt
         _, all_tags, strength_map, _ = split_weighted(tags)
         nl_prompt, _, _, strength_map_nl = split_weighted(nl_prompt)
+        embeddings = embedding_spellings(all_tags)
 
         api.tipo.BAN_TAGS = [tag.strip() for tag in ban_tags.split(",") if tag.strip()]
 
         tag_length = tag_length.replace(" ", "_")
-        org_tag_map = api.seperate_tags(all_tags)
+        org_tag_map = restore_embeddings(api.seperate_tags(all_tags), embeddings)
 
         meta, operations, general, nl_prompt = api.tipo_single_request(
             org_tag_map,
@@ -512,11 +633,13 @@ class TIPOOperation(io.ComfyNode):
             top_k=top_k,
         )
 
+        tag_map = restore_embeddings(tag_map, embeddings)
         addon = apply_strength(
             collect_addon(tag_map, org_tag_map), strength_map, strength_map_nl
         )
         addon["user_tags"] = tags
         addon["user_nl"] = original_nl_prompt
+        addon["networks"] = networks
 
         tag_map = apply_strength(tag_map, strength_map, strength_map_nl)
         return io.NodeOutput(tag_map, addon)
@@ -550,12 +673,14 @@ class TIPOFormat(io.ComfyNode):
         addon = dict(addon_output)
         tags = addon.pop("user_tags", "")
         nl_prompt = addon.pop("user_nl", "")
+        networks = addon.pop("networks", [])
         tag_map = full_output
 
         _, all_tags, strength_map, _ = split_weighted(tags)
         nl_prompt, _, _, strength_map_nl = split_weighted(nl_prompt)
+        embeddings = embedding_spellings(all_tags)
 
-        org_tag_map = api.seperate_tags(all_tags)
+        org_tag_map = restore_embeddings(api.seperate_tags(all_tags), embeddings)
         meta, _, general, nl_prompt = api.parse_tipo_request(org_tag_map, nl_prompt)
 
         org_formatted_prompt = api.parse_tipo_result(
@@ -579,12 +704,15 @@ class TIPOFormat(io.ComfyNode):
         unformatted_prompt_by_tipo = (
             tags + ", " + ", ".join(addon["tags"]) + "\n" + addon["nl"]
         )
+        tag_prompt, nl_output = split_tag_map(tag_map)
 
         return io.NodeOutput(
-            formatted_prompt_by_tipo,
+            with_networks(formatted_prompt_by_tipo, networks),
             formatted_prompt_by_user,
-            unformatted_prompt_by_tipo,
+            with_networks(unformatted_prompt_by_tipo, networks),
             unformatted_prompt_by_user,
+            with_networks(tag_prompt, networks),
+            nl_output,
         )
 
 
