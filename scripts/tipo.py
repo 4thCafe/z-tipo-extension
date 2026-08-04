@@ -2,27 +2,24 @@ import scripts
 
 print(scripts, scripts.__file__, dir(scripts))
 
-import os
+import ast
 import json
+import os
 import pathlib
 import random
-import ast
-from functools import lru_cache
+import sys
 
-import torch
 import gradio as gr
-
-import modules.ui as ui
-import modules.scripts as scripts
-from modules import devices, shared, options, infotext_utils
-from modules.scripts import basedir, OnComponent
+import torch
+from modules import devices, infotext_utils, options, scripts, shared, ui
+from modules.extra_networks import parse_prompt
 from modules.processing import (
-    StableDiffusionProcessingTxt2Img,
     StableDiffusionProcessingImg2Img,
+    StableDiffusionProcessingTxt2Img,
     fix_seed,
 )
 from modules.prompt_parser import parse_prompt_attention
-from modules.extra_networks import parse_prompt
+from modules.scripts import OnComponent, basedir
 from modules.shared import opts
 from modules.ui_components import ToolButton
 
@@ -32,22 +29,23 @@ try:
 except ImportError:
     InputAccordion = None
 
-import kgen.models as models
-import kgen.executor.tipo as tipo
+from kgen import models
+from kgen.executor import tipo
 from kgen.executor.tipo import (
     parse_tipo_request,
     tipo_runner,
-    apply_tipo_prompt,
-    parse_tipo_result,
 )
-from kgen.formatter import seperate_tags, apply_format
-from kgen.metainfo import TARGET, TIPO_DEFAULT_FORMAT
+from kgen.formatter import apply_format, seperate_tags
 from kgen.logging import logger
-
+from kgen.metainfo import TIPO_DEFAULT_FORMAT
 
 ext_dir = basedir()
 models.model_dir = pathlib.Path(ext_dir) / "models"
 
+if ext_dir not in sys.path:
+    sys.path.insert(0, ext_dir)
+
+from tipo_installer import ensure_runtime
 
 SEED_MAX = 2**31 - 1
 QUOTESWAP = str.maketrans("'\"", "\"'")
@@ -108,7 +106,7 @@ def on_process_timing_dropdown_changed(timing: str):
 
 
 def apply_strength(tag_map, strength_map, strength_map_nl, break_map):
-    for cate in tag_map.keys():
+    for cate in tag_map:
         new_list = []
         # Skip natural language output at first
         if isinstance(tag_map[cate], str):
@@ -189,7 +187,10 @@ class TIPOScript(scripts.Script):
         self.generation_info[i2i] = component.component
 
         # Connect reuse seed button if both components are available
-        if self.seed_reuse_btn[i2i] is not None and self.seed_num_input[i2i] is not None:
+        if (
+            self.seed_reuse_btn[i2i] is not None
+            and self.seed_num_input[i2i] is not None
+        ):
             self.connect_reuse_seed_button(i2i)
 
     def connect_reuse_seed_button(self, i2i: int):
@@ -219,7 +220,7 @@ class TIPOScript(scripts.Script):
                 prompt_gen = gr.Button(value="Generate Prompt")
             with gr.Column(scale=6):
                 # Create accordion with enable checkbox on the label
-                tab_name = 'img2img' if is_img2img else 'txt2img'
+                tab_name = "img2img" if is_img2img else "txt2img"
 
                 if InputAccordion is not None:
                     # WebUI >= 1.7: Use InputAccordion (checkbox on accordion label)
@@ -235,7 +236,7 @@ class TIPOScript(scripts.Script):
                     tipo_acc = gr.Accordion(
                         open=False,
                         label=self.title(),
-                        elem_id=f"{tab_name}_tipo_accordion"
+                        elem_id=f"{tab_name}_tipo_accordion",
                     )
                     enabled_check = None  # Will be created inside
 
@@ -311,7 +312,7 @@ class TIPOScript(scripts.Script):
                                 lambda x: gr.update(
                                     visible=x == "custom",
                                     value=TIPO_DEFAULT_FORMAT.get(
-                                        x, list(TIPO_DEFAULT_FORMAT.values())[0]
+                                        x, next(iter(TIPO_DEFAULT_FORMAT.values()))
                                     ),
                                 ),
                                 inputs=format_dropdown,
@@ -329,7 +330,9 @@ class TIPOScript(scripts.Script):
                                     )
                                     seed_random_btn = ToolButton(value=ui.random_symbol)
                                     seed_reuse_btn = ToolButton(value=ui.reuse_symbol)
-                                    seed_shuffle_btn = gr.Button(value="Shuffle", size="sm", scale=0)
+                                    seed_shuffle_btn = gr.Button(
+                                        value="Shuffle", size="sm", scale=0
+                                    )
 
                                     # Store references for later connection
                                     self.seed_num_input[is_img2img] = seed_num_input
@@ -511,29 +514,35 @@ class TIPOScript(scripts.Script):
                 infotext = infotexts[index]
 
                 # Parse generation parameters from infotext
-                gen_parameters = infotext_utils.parse_generation_parameters(infotext, [])
+                gen_parameters = infotext_utils.parse_generation_parameters(
+                    infotext, []
+                )
 
                 # Get TIPO Parameters string from parsed parameters
                 tipo_params_str = gen_parameters.get("TIPO Parameters", "")
 
                 if tipo_params_str:
                     # Convert JavaScript boolean literals to Python
-                    dict_string = tipo_params_str.replace('false', 'False').replace('true', 'True')
+                    dict_string = tipo_params_str.replace("false", "False").replace(
+                        "true", "True"
+                    )
 
                     # Parse as dictionary
                     tipo_params = ast.literal_eval(dict_string)
 
                     # Get seed value
-                    res = int(tipo_params.get('seed', -1))
+                    res = int(tipo_params.get("seed", -1))
             else:
                 # Fallback to extra_generation_params if index is out of range
                 extra_params = gen_info.get("extra_generation_params", {})
                 tipo_params_str = extra_params.get("TIPO Parameters", "")
 
                 if tipo_params_str:
-                    dict_string = tipo_params_str.replace('false', 'False').replace('true', 'True')
+                    dict_string = tipo_params_str.replace("false", "False").replace(
+                        "true", "True"
+                    )
                     tipo_params = ast.literal_eval(dict_string)
-                    res = int(tipo_params.get('seed', -1))
+                    res = int(tipo_params.get("seed", -1))
 
         except Exception as e:
             if gen_info_string:
@@ -685,6 +694,7 @@ class TIPOScript(scripts.Script):
         prompt = prompt.strip() or tag_prompt
         seed = int(seed) % SEED_MAX
         if model != self.current_model:
+            ensure_runtime()
             if " | " in model:
                 model_name, gguf_name = model.split(" | ")
                 target_file = f"{model_name.split('/')[-1]}_{gguf_name}"
@@ -695,7 +705,8 @@ class TIPOScript(scripts.Script):
             else:
                 target = model
                 gguf = False
-            models.load_model(target, gguf, device="cpu" if gguf_use_cpu else "cuda")
+            target_device = "cpu" if gguf_use_cpu else str(devices.device)
+            models.load_model(target, gguf, device=target_device)
             self.current_model = model
         prompt_preview = prompt.replace("\n", " ")[:40]
         logger.info(f"Processing prompt: {prompt_preview}...")
@@ -768,7 +779,7 @@ class TIPOScript(scripts.Script):
             "tags": [],
             "nl": "",
         }
-        for cate in tag_map.keys():
+        for cate in tag_map:
             if cate == "generated" and addon["nl"] == "":
                 addon["nl"] = tag_map[cate]
                 continue
