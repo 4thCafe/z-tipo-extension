@@ -1,12 +1,9 @@
-import scripts
-
-print(scripts, scripts.__file__, dir(scripts))
-
 import ast
 import json
 import os
 import pathlib
 import random
+import re
 import sys
 
 import gradio as gr
@@ -132,6 +129,58 @@ def apply_strength(tag_map, strength_map, strength_map_nl, break_map):
                 new_list.append("BREAK")
         tag_map[cate] = new_list
 
+    return tag_map
+
+
+COMMENT_LINE = re.compile(r"^[^\S\n]*#[^\n]*(?:\n|$)", re.MULTILINE)
+DANGLING = re.compile(r"(?:^[\s,]+|[\s,]+$)")
+REPEATED_COMMA = re.compile(r",\s*(?=,)")
+
+
+def strip_comments(text: str) -> str:
+    """Drop lines whose first non-space character is '#' (issue #22)."""
+    if not text or "#" not in text:
+        return text
+    cleaned = REPEATED_COMMA.sub("", COMMENT_LINE.sub("", text))
+    return DANGLING.sub("", cleaned)
+
+
+def embedding_names() -> set:
+    try:
+        from modules.sd_hijack import model_hijack
+
+        return {str(name).lower() for name in model_hijack.embedding_db.word_embeddings}
+    except Exception:
+        return set()
+
+
+def embedding_spellings(tags) -> dict:
+    """Map kgen's spaced form back to the original, for embeddings only.
+
+    seperate_tags spaces out underscores for any token no tag list claims. That
+    is correct for general tags, but an embedding name looks exactly like a tag,
+    so ask the webui which names are loaded and protect only those (issue #119).
+    """
+    known = embedding_names()
+    if not known:
+        return {}
+    return {
+        tag.replace("_", " "): tag
+        for tag in tags
+        if len(tag) >= 4 and "_" in tag and tag.lower() in known
+    }
+
+
+def restore_embeddings(tag_map, mapping):
+    if not mapping:
+        return tag_map
+    for cate, value in tag_map.items():
+        if isinstance(value, list):
+            tag_map[cate] = [mapping.get(tag, tag) for tag in value]
+        elif isinstance(value, str):
+            for spaced, original in mapping.items():
+                value = value.replace(spaced, original)
+            tag_map[cate] = value
     return tag_map
 
 
@@ -708,6 +757,8 @@ class TIPOScript(scripts.Script):
             target_device = "cpu" if gguf_use_cpu else str(devices.device)
             models.load_model(target, gguf, device=target_device)
             self.current_model = model
+        prompt = strip_comments(prompt)
+        nl_prompt = strip_comments(nl_prompt)
         prompt_preview = prompt.replace("\n", " ")[:40]
         logger.info(f"Processing prompt: {prompt_preview}...")
         logger.info(f"Processing with seed: {seed}")
@@ -747,7 +798,8 @@ class TIPOScript(scripts.Script):
 
         tag_length = tag_length.replace(" ", "_")
         nl_length = nl_length.replace(" ", "_")
-        org_tag_map = seperate_tags(all_tags)
+        embeddings = embedding_spellings(all_tags)
+        org_tag_map = restore_embeddings(seperate_tags(all_tags), embeddings)
 
         meta, operations, general, nl_prompt = parse_tipo_request(
             org_tag_map,
@@ -775,6 +827,7 @@ class TIPOScript(scripts.Script):
             models.text_model.cpu()
             devices.torch_gc()
 
+        tag_map = restore_embeddings(tag_map, embeddings)
         addon = {
             "tags": [],
             "nl": "",
