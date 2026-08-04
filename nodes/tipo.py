@@ -45,13 +45,28 @@ DEFAULT_OPERATION = "short_to_tag_to_long"
 _current_model = None
 
 
+def managed_gguf_names() -> "set[str]":
+    """Filenames download_gguf writes, using its own `{repo stem}_{file}` scheme."""
+    return {
+        f"{name.split('/')[-1]}_{gguf}"
+        for name, ggufs in models.tipo_model_list
+        for gguf in ggufs
+    }
+
+
 def model_options():
     names = [
         f"{name} | {gguf}" for name, ggufs in models.tipo_model_list for gguf in ggufs
     ]
     names += [name for name, _ in models.tipo_model_list]
+
+    # Listed above as "repo | file", which the registry resolves; the raw
+    # filename would be the same model again under a name it cannot.
+    managed = managed_gguf_names()
     names += sorted(
-        file for file in os.listdir(models.model_dir) if file.endswith(".gguf")
+        file
+        for file in os.listdir(models.model_dir)
+        if file.endswith(".gguf") and file not in managed
     )
     return names
 
