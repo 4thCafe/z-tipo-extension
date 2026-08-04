@@ -56,6 +56,7 @@ PROCESSING_TIMING = {
     "BEFORE": "Before applying other prompt processings",
     "AFTER": "After applying other prompt processings",
 }
+EXTRA_INPUT_LAYOUT = ["Side by side", "Stacked"]
 DEFAULT_FORMAT = """<|special|>, 
 <|characters|>, <|copyrights|>, 
 <|artist|>, 
@@ -205,20 +206,31 @@ class TIPOScript(scripts.Script):
         ]
 
     def create_new_prompt_area(self, i2i: int, prompt_row: OnComponent):
-        # Create first row: Tag Prompt and Natural Language Prompt in 2 columns
+        stacked = getattr(opts, "tipo_extra_input_layout", EXTRA_INPUT_LAYOUT[0])
+        lines = 2 if stacked == EXTRA_INPUT_LAYOUT[1] else 3
+        tag_kwargs = {
+            "label": "Tag Prompt",
+            "lines": lines,
+            "placeholder": "Tag Prompt for TIPO (Put Tags to Prompt region)",
+        }
+        nl_kwargs = {
+            "label": "Natural Language Prompt",
+            "lines": lines,
+            "placeholder": "Natural Language Prompt for TIPO (Put Tags to Prompt region)",
+        }
+
         with gr.Row(visible=not opts.tipo_no_extra_input):
-            with gr.Column(scale=1):
-                new_tag_prompt_area = gr.Textbox(
-                    label="Tag Prompt",
-                    lines=3,
-                    placeholder="Tag Prompt for TIPO (Put Tags to Prompt region)",
-                )
-            with gr.Column(scale=1):
-                new_prompt_area = gr.Textbox(
-                    label="Natural Language Prompt",
-                    lines=3,
-                    placeholder="Natural Language Prompt for TIPO (Put Tags to Prompt region)",
-                )
+            if stacked == EXTRA_INPUT_LAYOUT[1]:
+                # One full-width column keeps the main prompt at full width
+                # instead of splitting the row in half (issue #47).
+                with gr.Column(scale=1):
+                    new_tag_prompt_area = gr.Textbox(**tag_kwargs)
+                    new_prompt_area = gr.Textbox(**nl_kwargs)
+            else:
+                with gr.Column(scale=1):
+                    new_tag_prompt_area = gr.Textbox(**tag_kwargs)
+                with gr.Column(scale=1):
+                    new_prompt_area = gr.Textbox(**nl_kwargs)
 
         # Create second row: Generate Prompt button (below the two input areas)
         self.prompt_area_row[i2i] = gr.Row()
@@ -401,6 +413,16 @@ class TIPOScript(scripts.Script):
                                     if self.generation_info[is_img2img] is not None:
                                         self.connect_reuse_seed_button(is_img2img)
 
+                                use_generation_seed = gr.Checkbox(
+                                    label="Follow the image generation seed",
+                                    info=(
+                                        "Upsample with the seed of the image being "
+                                        "generated, so the prompt tracks the image "
+                                        "instead of needing its own seed."
+                                    ),
+                                    value=False,
+                                )
+
                             with gr.Group():
                                 process_timing_dropdown = gr.Dropdown(
                                     label="Upsampling timing",
@@ -520,12 +542,19 @@ class TIPOScript(scripts.Script):
             ),
             (gguf_use_cpu, lambda d: self.get_infotext(d, "gguf_cpu", None)),
             (no_formatting, lambda d: self.get_infotext(d, "no_formatting", None)),
+            (
+                use_generation_seed,
+                lambda d: self.get_infotext(d, "follow_generation_seed", None),
+            ),
         ]
 
+        # use_generation_seed sits right after the seed it overrides, so every
+        # later position keeps the index write_infotext and _process expect.
         return [
             enabled_check,
             process_timing_dropdown,
             seed_num_input,
+            use_generation_seed,
             tag_length_radio,
             nl_length_radio,
             ban_tags_textbox,
@@ -608,11 +637,13 @@ class TIPOScript(scripts.Script):
         prompt: str,
         process_timing: str,
         seed: int,
+        follow_generation_seed: bool,
         *args,
     ):
         p.extra_generation_params[INFOTEXT_KEY] = json.dumps(
             {
                 "seed": seed,
+                "follow_generation_seed": follow_generation_seed,
                 "timing": process_timing,
                 "tag_length": args[0],
                 "nl_length": args[1],
@@ -639,6 +670,7 @@ class TIPOScript(scripts.Script):
         is_enabled: bool,
         process_timing: str,
         seed: int,
+        follow_generation_seed: bool,
         *args,
     ):
         """This method will be called after sd-dynamic-prompts and the styles are applied."""
@@ -660,14 +692,17 @@ class TIPOScript(scripts.Script):
         if args[3] != "custom":
             args[4] = TIPO_DEFAULT_FORMAT.get(args[3], args[4])
 
-        self.write_infotext(p, p.prompt, "AFTER", seed, *args)
+        self.write_infotext(p, p.prompt, "AFTER", seed, follow_generation_seed, *args)
 
         args = list(args)
         nl_prompt = args.pop()
         new_all_prompts = []
         for prompt, sub_seed in zip(p.all_prompts, p.all_seeds):
+            # Following the image seed keeps each batch item's prompt tied to the
+            # image it produces (issue #14).
+            tipo_seed = int(sub_seed) if follow_generation_seed else seed + sub_seed
             new_all_prompts.append(
-                self._process(prompt, nl_prompt, aspect_ratio, seed + sub_seed, *args)
+                self._process(prompt, nl_prompt, aspect_ratio, tipo_seed, *args)
             )
 
         hr_fix_enabled = getattr(p, "enable_hr", False)
@@ -691,6 +726,7 @@ class TIPOScript(scripts.Script):
         is_enabled: bool,
         process_timing: str,
         seed: int,
+        follow_generation_seed: bool,
         *args,
     ):
         """This method will be called before sd-dynamic-prompts and the styles are applied."""
@@ -706,9 +742,9 @@ class TIPOScript(scripts.Script):
         aspect_ratio = p.width / p.height
         if seed == -1:
             seed = random.randrange(4294967294)
-        self.write_infotext(p, p.prompt, "BEFORE", seed, *args)
+        self.write_infotext(p, p.prompt, "BEFORE", seed, follow_generation_seed, *args)
         fix_seed(p)
-        seed = int(seed + p.seed)
+        seed = int(p.seed) if follow_generation_seed else int(seed + p.seed)
 
         args = list(args)
         p.prompt = self._process(p.prompt, args.pop(), aspect_ratio, seed, *args)
@@ -890,6 +926,12 @@ shared.options_templates.update(
                     ", Natural Language Prompt and Tag Prompt will be hidden."
                     " (UI Reload Needed)"
                 ),
+            ),
+            "tipo_extra_input_layout": shared.OptionInfo(
+                EXTRA_INPUT_LAYOUT[0],
+                "Layout for the TIPO prompt inputs (UI Reload Needed)",
+                gr.Radio,
+                {"choices": EXTRA_INPUT_LAYOUT},
             ),
         },
     )
