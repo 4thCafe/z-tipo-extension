@@ -20,6 +20,11 @@ from kgen.formatter import apply_format, seperate_tags
 
 from ..tipo_installer import ensure_runtime, logger
 from ..tipo_installer.hardware import torch_devices
+from .pony_score import inject_pony_score, patch_kgen_tag_lists
+
+# Pony系スコアタグ(score_9 等)を <|pony_score|> として扱えるようにする。
+# kgen の tag_lists を書き換えるため、seperate_tags を使う前に一度だけ適用する。
+patch_kgen_tag_lists()
 
 CATEGORY = "utils/promptgen"
 LIST = io.Custom("LIST")
@@ -28,7 +33,8 @@ models.model_dir = Path(folder_paths.models_dir) / "kgen"
 os.makedirs(models.model_dir, exist_ok=True)
 logger.info(f"Using model dir: {models.model_dir}")
 
-DEFAULT_FORMAT = """<|special|>,
+DEFAULT_FORMAT = """<|pony_score|>,
+<|special|>,
 <|characters|>, <|copyrights|>,
 <|artist|>,
 
@@ -413,7 +419,19 @@ class TIPO(io.ComfyNode):
             search_aliases=["tipo", "dantaggen", "prompt gen", "upsample prompt"],
             inputs=common_inputs(
                 io.String.Input("format", multiline=True, default=DEFAULT_FORMAT)
-            ),
+            )
+            # 末尾に追加する。既存ワークフローは widgets_values を位置で照合するため、
+            # 途中に挿すと保存済みの値がすべてずれる。
+            + [
+                io.Boolean.Input(
+                    "enable_generation",
+                    default=True,
+                    tooltip=(
+                        "Off: skip the LLM entirely (no model download/load) and "
+                        "just format the given tags."
+                    ),
+                )
+            ],
             outputs=prompt_outputs(),
         )
 
@@ -435,9 +453,11 @@ class TIPO(io.ComfyNode):
         seed: int,
         device: str,
         format: str,
+        enable_generation: bool = True,
     ) -> io.NodeOutput:
         ensure_runtime()
-        load_model(tipo_model, device)
+        if enable_generation:
+            load_model(tipo_model, device)
 
         tags, networks = extract_extra_networks(strip_comments(tags))
         nl_prompt = strip_comments(nl_prompt)
@@ -478,8 +498,22 @@ class TIPO(io.ComfyNode):
         org_formatted_prompt = apply_strength(
             org_formatted_prompt, strength_map, strength_map_nl
         )
+        org_formatted_prompt = inject_pony_score(org_formatted_prompt, org_tag_map)
         formatted_prompt_by_user = apply_format(org_formatted_prompt, format)
         unformatted_prompt_by_user = tags + nl_prompt
+
+        if not enable_generation:
+            # 推論を行わず、入力タグを整形した結果だけを返す。
+            # LLM由来の出力にもユーザー整形版を流用し、下流の配線を保つ。
+            tag_prompt, nl_output = split_tag_map(org_formatted_prompt)
+            return io.NodeOutput(
+                with_networks(formatted_prompt_by_user, networks),
+                formatted_prompt_by_user,
+                with_networks(unformatted_prompt_by_user, networks),
+                unformatted_prompt_by_user,
+                with_networks(tag_prompt, networks),
+                nl_output,
+            )
 
         tag_map, _ = tipo_runner(
             meta,
@@ -502,6 +536,7 @@ class TIPO(io.ComfyNode):
         )
 
         tag_map = apply_strength(tag_map, strength_map, strength_map_nl)
+        tag_map = inject_pony_score(tag_map, org_tag_map)
         formatted_prompt_by_tipo = apply_format(tag_map, format)
         tag_prompt, nl_output = split_tag_map(tag_map)
 
@@ -603,6 +638,7 @@ class TIPOOperation(io.ComfyNode):
         addon["networks"] = networks
 
         tag_map = apply_strength(tag_map, strength_map, strength_map_nl)
+        tag_map = inject_pony_score(tag_map, org_tag_map)
         return io.NodeOutput(tag_map, addon)
 
 
@@ -658,6 +694,7 @@ class TIPOFormat(io.ComfyNode):
         org_formatted_prompt = apply_strength(
             org_formatted_prompt, strength_map, strength_map_nl
         )
+        org_formatted_prompt = inject_pony_score(org_formatted_prompt, org_tag_map)
 
         formatted_prompt_by_user = apply_format(org_formatted_prompt, format)
         unformatted_prompt_by_user = tags + nl_prompt
